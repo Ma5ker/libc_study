@@ -49,18 +49,18 @@
 /* A heap is a single contiguous memory region holding (coalesceable)
    malloc_chunks.  It is allocated with mmap() and always starts at an
    address aligned to HEAP_MAX_SIZE.  */
-
+/*描述堆信息的结构体*/
 typedef struct _heap_info
 {
-  mstate ar_ptr; /* Arena for this heap. */
-  struct _heap_info *prev; /* Previous heap. */
-  size_t size;   /* Current size in bytes. */
+  mstate ar_ptr; /* Arena for this heap. 堆对应的 arena 的地址*/
+  struct _heap_info *prev; /* Previous heap. 一个线程可能会有多个堆。prev 即记录了上一个 heap_info 的地址*/
+  size_t size;   /* Current size in bytes.当前堆的大小 */
   size_t mprotect_size; /* Size in bytes that has been mprotected
                            PROT_READ|PROT_WRITE.  */
   /* Make sure the following data is properly aligned, particularly
      that sizeof (heap_info) + 2 * SIZE_SZ is a multiple of
      MALLOC_ALIGNMENT. */
-  char pad[-6 * SIZE_SZ & MALLOC_ALIGN_MASK];
+  char pad[-6 * SIZE_SZ & MALLOC_ALIGN_MASK];/*保证对齐？*/
 } heap_info;
 
 /* Get a compile-time error if the heap_info padding is not correct

@@ -1,1 +1,3 @@
-GNU libc source code and comments
+This repo is used for store GNU libc source code and comments.There may be other content, according to my study direction.But for now, I'm trying to read the heap related libc source code and add my  comments...
+
+[+] reading malloc and heap related source code 
