@@ -320,6 +320,7 @@ __malloc_assert (const char *assertion, const char *file, unsigned int line,
 
 /* This is another arbitrary limit, which tunables can change.  Each
    tcache bin will hold at most this number of chunks.  */
+/*每个tcache链上chunk的最大值*/
 # define TCACHE_FILL_COUNT 7
 
 /* Maximum chunks in tcache bins for tunables.  This value must fit the range
@@ -959,7 +960,11 @@ int      __posix_memalign(void **, size_t, size_t);
 */
 
 #define M_MMAP_THRESHOLD      -3
-
+/*
+#ifndef DEFAULT_MMAP_THRESHOLD_MIN
+#define DEFAULT_MMAP_THRESHOLD_MIN (128 * 1024)
+#endif
+*/
 #ifndef DEFAULT_MMAP_THRESHOLD
 #define DEFAULT_MMAP_THRESHOLD DEFAULT_MMAP_THRESHOLD_MIN
 #endif
@@ -1401,17 +1406,17 @@ typedef struct malloc_chunk *mbinptr;
 
 /*
    Indexing
-
+    
     Bins for sizes < 512 bytes contain chunks of all the same size, spaced
     8 bytes apart. Larger bins are approximately logarithmically spaced:
 
-    64 bins of size       8  small bin的组间距（32位下为8bit 64位下为6bit），下面是large bin的组间距
-    32 bins of size      64
-    16 bins of size     512
-     8 bins of size    4096
-     4 bins of size   32768
-     2 bins of size  262144
-     1 bin  of size what's left
+    64 bins of size       8  small bin的组间距（32位下为8bit 64位下为6bit）
+    32 bins of size      64  large bin每个bin内存放的是一定范围的chunk  这里数值表示的是这个范围  也就是组内间距0x40
+    16 bins of size     512    0x200
+     8 bins of size    4096    0x1000
+     4 bins of size   32768    0x8000
+     2 bins of size  262144    0x40000
+     1 bin  of size what's left  剩下的？？
 
     There is actually a little bit of slop in the numbers in bin_index
     for the sake of speed. This makes no difference elsewhere.
@@ -1421,17 +1426,18 @@ typedef struct malloc_chunk *mbinptr;
 
     Bin 0 does not exist.  Bin 1 is the unordered list; if that would be
     a valid chunk size the small bins are bumped up one.
+    unsorted bin  1个  bin[1]
+    small bin 有62个 bin[2]bin[3]...bin[124]bin[125]组内chunk大小相同，组间距8字节
+    large bin 有63个 bin[126]bin[127]  ... bin[250]bin[251]   
 
-    small bin 有bin[2]bin[3]...bin[124]bin[125]组内chunk大小相同，组间距8字节
-    large bin  bin[126]bin[127]  ... bin[250]bin[251]   
-    共63 个 bin 被分成了 7 组   每组公差 
+    这段咋总感觉不太对  少一个bin啊  第127个bin是干啥的 bin[252]bin[253]好像没有作用?
  */
 
-#define NBINS             128 /*bin的总数*/
-#define NSMALLBINS         64
+#define NBINS             128 /*bin的总数  unsorted bin(1)+smallbin(62)+largebin(63)+1 */
+#define NSMALLBINS         64/*small bin  本来是只有62个small bin，64方便计算？*/
 #define SMALLBIN_WIDTH    MALLOC_ALIGNMENT
-#define SMALLBIN_CORRECTION (MALLOC_ALIGNMENT > 2 * SIZE_SZ)/*针对自定义small bin 大小的矫正*/
-#define MIN_LARGE_SIZE    ((NSMALLBINS - SMALLBIN_CORRECTION) * SMALLBIN_WIDTH)/*因为每个small bin以SMALLBIN_WIDTH等差递增 所以这样得到最大(?)的small bin 即是最小的large bin*/
+#define SMALLBIN_CORRECTION (MALLOC_ALIGNMENT > 2 * SIZE_SZ)/*针对small bin的矫正*/
+#define MIN_LARGE_SIZE    ((NSMALLBINS - SMALLBIN_CORRECTION) * SMALLBIN_WIDTH)/*因为每个small bin以SMALLBIN_WIDTH等差递增 所以这样得到最小的large bin?*/
 /*判断是否在small bin大小中*/
 #define in_smallbin_range(sz)  \
   ((unsigned long) (sz) < (unsigned long) MIN_LARGE_SIZE)
@@ -1849,12 +1855,23 @@ static mchunkptr dumped_main_arena_end;   /* Exclusive.  */
   ((p) >= dumped_main_arena_start && (p) < dumped_main_arena_end)
 
 /* There is only one instance of the malloc parameters.  */
-
+/*默认情况下的值*/
+/*
+#ifndef DEFAULT_MMAP_THRESHOLD_MIN
+#define DEFAULT_MMAP_THRESHOLD_MIN (128 * 1024)
+#endif
+#ifndef DEFAULT_MMAP_THRESHOLD
+#define DEFAULT_MMAP_THRESHOLD DEFAULT_MMAP_THRESHOLD_MIN
+#endif
+#ifndef DEFAULT_TOP_PAD
+# define DEFAULT_TOP_PAD 131072
+#endif
+*/
 static struct malloc_par mp_ =
 {
   .top_pad = DEFAULT_TOP_PAD,
   .n_mmaps_max = DEFAULT_MMAP_MAX,
-  .mmap_threshold = DEFAULT_MMAP_THRESHOLD,
+  .mmap_threshold = DEFAULT_MMAP_THRESHOLD,//128*1024   就是128k
   .trim_threshold = DEFAULT_TRIM_THRESHOLD,
 #define NARENAS_FROM_NCORES(n) ((n) * (sizeof (long) == 4 ? 2 : 8))
   .arena_test = NARENAS_FROM_NCORES (1)
@@ -2338,7 +2355,7 @@ do_check_malloc_state (mstate av)
    space to service request for nb bytes, thus requiring that av->top
    be extended or replaced.
  */
-
+/*在top chunk不够的时候，向系统申请更多的空间*/
 static void *
 sysmalloc (INTERNAL_SIZE_T nb, mstate av)
 {
@@ -2360,8 +2377,14 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
   mchunkptr remainder;            /* remainder from allocation */
   unsigned long remainder_size;   /* its size */
 
-
-  size_t pagesize = GLRO (dl_pagesize);
+  /* 关于pagesize 即页大小
+   * #ifndef EXEC_PAGESIZE
+   * #define EXEC_PAGESIZE	4096
+   * #endif
+   * size_t _dl_pagesize = EXEC_PAGESIZE;
+   * # define GLRO(name) _##name
+   **/
+  size_t pagesize = GLRO (dl_pagesize);//0x1000
   bool tried_mmap = false;
 
 
@@ -2371,7 +2394,8 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
      allocated mmapped regions, try to directly map this request
      rather than expanding top.
    */
-
+  /*如果具有mmap，并且请求大小满足mmap阈值，并且系统支持mmap，并且当前分配的mmapped区域很少，尝试直接映射此请求，而不是扩展top*/
+  /*具体来说就是申请的内存大于mmap_threshold 而mmap 的数量n_mmaps小于最大值n_mmaps_max；(这里默认临界值存放在mp_中)*/
   if (av == NULL
       || ((unsigned long) (nb) >= (unsigned long) (mp_.mmap_threshold)
 	  && (mp_.n_mmaps < mp_.n_mmaps_max)))
@@ -2449,11 +2473,12 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
     }
 
   /* There are no usable arenas and mmap also failed.  */
+  /*mmap失败了  或者说没有可用的arena  就退出*/
   if (av == NULL)
     return 0;
 
   /* Record incoming configuration of top */
-
+  /*成功了至少一个 记录旧堆的top chunk信息  */
   old_top = av->top;
   old_size = chunksize (old_top);
   old_end = (char *) (chunk_at_offset (old_top, old_size));
@@ -2464,16 +2489,20 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
      If not the first time through, we require old_size to be
      at least MINSIZE and to have prev_inuse set.
    */
-
+  /*检查旧堆的信息*/
+  /*如果是第一次  那top chunk为0*/
+  /*新的堆 堆的大小应该不小于 MINSIZE，并且前一个堆块应该处于使用中*/
+  /*堆的结束地址应该是页对齐的，大小默认是 0x1000，低12位为0*/
   assert ((old_top == initial_top (av) && old_size == 0) ||
           ((unsigned long) (old_size) >= MINSIZE &&
            prev_inuse (old_top) &&
            ((unsigned long) old_end & (pagesize - 1)) == 0));
 
   /* Precondition: not enough current space to satisfy nb request */
+  /*继续检查旧堆信息*/
   assert ((unsigned long) (old_size) < (unsigned long) (nb + MINSIZE));
 
-
+  /*av不是main arena*/
   if (av != &main_arena)
     {
       heap_info *old_heap, *heap;
@@ -2523,9 +2552,9 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
         /* We can at least try to use to mmap memory.  */
         goto try_mmap;
     }
-  else     /* av == main_arena */
+  else     /* av == main_arena的情况下 */
 
-
+    /*计算请求需要的大小   这个mp_.top_pad默认是131072  就是0x20000*/
     { /* Request enough space for nb + pad + overhead */
       size = nb + mp_.top_pad + MINSIZE;
 
@@ -2534,7 +2563,7 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
          combine with new space. We add it back later only if
          we don't actually get contiguous space.
        */
-
+      /*是否希望连续  复用之前的内存  所以剪掉原来的大小*/
       if (contiguous (av))
         size -= old_size;
 
@@ -2545,7 +2574,7 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
          this is not first time through, this preserves page-alignment of
          previous calls. Otherwise, we correct to page-align below.
        */
-
+      /*对齐*/
       size = ALIGN_UP (size, pagesize);
 
       /*
@@ -2553,20 +2582,23 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
          negative. Note that since mmap takes size_t arg, it may succeed
          below even if we cannot call MORECORE.
        */
-
+      /*申请内存*/
       if (size > 0)
         {
+          /*移动brk*/
           brk = (char *) (MORECORE (size));
           LIBC_PROBE (memory_sbrk_more, 2, brk, size);
         }
 
       if (brk != (char *) (MORECORE_FAILURE))
         {
+          /*c成功后调用了个hook？*/
           /* Call the `morecore' hook if necessary.  */
           void (*hook) (void) = atomic_forced_read (__after_morecore_hook);
           if (__builtin_expect (hook != NULL, 0))
             (*hook)();
         }
+      /*申请失败  使用mmap*/
       else
         {
           /*
@@ -2610,6 +2642,7 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
 
       if (brk != (char *) (MORECORE_FAILURE))
         {
+          /*成功后*/
           if (mp_.sbrk_base == 0)
             mp_.sbrk_base = brk;
           av->system_mem += size;
@@ -2617,10 +2650,10 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
           /*
              If MORECORE extends previous space, we can likewise extend top size.
            */
-
+          /*扩展top chunk的size  设置头部*/
           if (brk == old_end && snd_brk == (char *) (MORECORE_FAILURE))
             set_head (old_top, (size + old_size) | PREV_INUSE);
-
+          /*内存耗尽？*/
           else if (contiguous (av) && old_size && brk < old_end)
 	    /* Oops!  Someone else killed our space..  Can't touch anything.  */
 	    malloc_printerr ("break adjusted to free malloc space");
@@ -2643,7 +2676,7 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
               So we allocate enough more memory to hit a page boundary now,
               which in turn causes future contiguous calls to page-align.
            */
-
+          /*其他情况*/
           else
             {
               front_misalign = 0;
@@ -2652,6 +2685,7 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
               aligned_brk = brk;
 
               /* handle contiguous cases */
+              /*连续内存情况*/
               if (contiguous (av))
                 {
                   /* Count foreign sbrk as system_mem.  */
@@ -2714,6 +2748,7 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
                 }
 
               /* handle non-contiguous cases */
+              /*不连续内存情况*/
               else
                 {
                   if (MALLOC_ALIGNMENT == 2 * SIZE_SZ)
@@ -2744,6 +2779,7 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
                 }
 
               /* Adjust top based on results of second sbrk */
+              /*根据sbrk结果调整top chunk*/
               if (snd_brk != (char *) (MORECORE_FAILURE))
                 {
                   av->top = (mchunkptr) aligned_brk;
@@ -2790,15 +2826,17 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
             }
         }
     } /* if (av !=  &main_arena) */
-
+  /*更新最大内存*/
   if ((unsigned long) av->system_mem > (unsigned long) (av->max_system_mem))
     av->max_system_mem = av->system_mem;
   check_malloc_state (av);
 
   /* finally, do the allocation */
+  /*分配内存块*/
+  /*获取大小*/
   p = av->top;
   size = chunksize (p);
-
+  /*对top进行切分*/
   /* check that one of the above allocation paths succeeded */
   if ((unsigned long) (size) >= (unsigned long) (nb + MINSIZE))
     {
@@ -2812,6 +2850,7 @@ sysmalloc (INTERNAL_SIZE_T nb, mstate av)
     }
 
   /* catch all failure paths */
+  /*catch 出现的错误*/
   __set_errno (ENOMEM);
   return 0;
 }
@@ -2980,10 +3019,12 @@ mremap_chunk (mchunkptr p, size_t new_size)
 
 /* We overlay this structure on the user-data portion of a chunk when
    the chunk is stored in the per-thread cache.  */
+/*tcache entry结构体 用于链接空闲的chunk结构体，其中的next指针指向下一个相同大小的chunk*/
 typedef struct tcache_entry
 {
-  struct tcache_entry *next;
+  struct tcache_entry *next;/* next指向的是chunk的user data的开始，而非chunk的开始*/
   /* This field exists to detect double frees.  */
+  /*这个域用来检测double free？*/
   struct tcache_perthread_struct *key;
 } tcache_entry;
 
@@ -2992,10 +3033,11 @@ typedef struct tcache_entry
    overall size low is mildly important.  Note that COUNTS and ENTRIES
    are redundant (we could have just counted the linked list each
    time), this is for performance reasons.  */
+/*每个thread维护一个tcache_prethread_struct*/
 typedef struct tcache_perthread_struct
 {
-  uint16_t counts[TCACHE_MAX_BINS];
-  tcache_entry *entries[TCACHE_MAX_BINS];
+  uint16_t counts[TCACHE_MAX_BINS];//计数器 记录tcache_entry链上空闲chunk的数目，每条链上最多有7个chunk
+  tcache_entry *entries[TCACHE_MAX_BINS];//tcache_entry数组，每个都是以单向链表的方式链接了大小相同的的处于空闲状态或者说free 后的chunk
 } tcache_perthread_struct;
 
 static __thread bool tcache_shutting_down = false;
@@ -3003,29 +3045,33 @@ static __thread tcache_perthread_struct *tcache = NULL;
 
 /* Caller must ensure that we know tc_idx is valid and there's room
    for more chunks.  */
+/*将一个chunk放回tcache中*/
 static __always_inline void
 tcache_put (mchunkptr chunk, size_t tc_idx)
 {
+  /*chunk转为mem指针*/
   tcache_entry *e = (tcache_entry *) chunk2mem (chunk);
 
   /* Mark this chunk as "in the tcache" so the test in _int_free will
      detect a double free.  */
+  //设置放回头部
   e->key = tcache;
 
   e->next = tcache->entries[tc_idx];
   tcache->entries[tc_idx] = e;
-  ++(tcache->counts[tc_idx]);
+  ++(tcache->counts[tc_idx]);//计数器自增
 }
 
 /* Caller must ensure that we know tc_idx is valid and there's
    available chunks to remove.  */
+/*传入index  获取对应tcache链的chunk*/
 static __always_inline void *
 tcache_get (size_t tc_idx)
 {
-  tcache_entry *e = tcache->entries[tc_idx];
-  tcache->entries[tc_idx] = e->next;
-  --(tcache->counts[tc_idx]);
-  e->key = NULL;
+  tcache_entry *e = tcache->entries[tc_idx];//得到对应的链表头
+  tcache->entries[tc_idx] = e->next;//将第一个tcache拿掉
+  --(tcache->counts[tc_idx]);//count减一
+  e->key = NULL;//拿出的tcache chunk 其key指针从指向tcache_perthreadStruct结构体置为NULL
   return (void *) e;
 }
 
@@ -3056,7 +3102,7 @@ tcache_thread_shutdown (void)
 
   __libc_free (tcache_tmp);
 }
-
+/*初始化tcache*/
 static void
 tcache_init(void)
 {
@@ -3067,8 +3113,8 @@ tcache_init(void)
   if (tcache_shutting_down)
     return;
 
-  arena_get (ar_ptr, bytes);
-  victim = _int_malloc (ar_ptr, bytes);
+  arena_get (ar_ptr, bytes);//找到可用arena
+  victim = _int_malloc (ar_ptr, bytes);//申请一个chunk存放 tcache_prethread_struct
   if (!victim && ar_ptr != NULL)
     {
       ar_ptr = arena_get_retry (ar_ptr, bytes);
@@ -3084,6 +3130,7 @@ tcache_init(void)
      typically do this very early, so either there is sufficient
      memory, or there isn't enough memory to do non-trivial
      allocations anyway.  */
+     /*初始化tcache*/
   if (victim)
     {
       tcache = (tcache_perthread_struct *) victim;
@@ -3091,7 +3138,7 @@ tcache_init(void)
     }
 
 }
-
+/*MAYBE_INIT_TCACHE调用了tcache_init()初始化tcache*/
 # define MAYBE_INIT_TCACHE() \
   if (__glibc_unlikely (tcache == NULL)) \
     tcache_init();
@@ -3122,22 +3169,24 @@ __libc_malloc (size_t bytes)
     return (*hook)(bytes, RETURN_ADDRESS (0));
 #if USE_TCACHE
   /* int_free also calls request2size, be careful to not pad twice.  */
+
   size_t tbytes;
+  /*根据传入的参数计算chunk大小，得到tcache对应的下标*/
   if (!checked_request2size (bytes, &tbytes))
     {
       __set_errno (ENOMEM);
       return NULL;
     }
-  size_t tc_idx = csize2tidx (tbytes);
-
+  size_t tc_idx = csize2tidx (tbytes);/*转为tcache 的index*/
+  /*初始化 tcache*/
   MAYBE_INIT_TCACHE ();
 
   DIAG_PUSH_NEEDS_COMMENT;
-  if (tc_idx < mp_.tcache_bins
+  if (tc_idx < mp_.tcache_bins//根据size得到的idx在合法的范围内
       && tcache
-      && tcache->counts[tc_idx] > 0)
+      && tcache->counts[tc_idx] > 0)//对应的tcache 链不为空
     {
-      return tcache_get (tc_idx);
+      return tcache_get (tc_idx);//转入tcache获取
     }
   DIAG_POP_NEEDS_COMMENT;
 #endif
@@ -3183,7 +3232,7 @@ __libc_free (void *mem)
 {
   mstate ar_ptr;
   mchunkptr p;                          /* chunk corresponding to mem */
-
+  /*是否有钩子函数 __free_hook*/
   void (*hook) (void *, const void *)
     = atomic_forced_read (__free_hook);
   if (__builtin_expect (hook != NULL, 0))
@@ -3191,12 +3240,12 @@ __libc_free (void *mem)
       (*hook)(mem, RETURN_ADDRESS (0));
       return;
     }
-
+  /*free一个NULL不起作用*/
   if (mem == 0)                              /* free(0) has no effect */
     return;
-
+  /*mem指针转换为chunk指针*/
   p = mem2chunk (mem);
-
+  /*内存是mmap得到的*/
   if (chunk_is_mmapped (p))                       /* release mmapped memory. */
     {
       /* See if the dynamic brk/mmap threshold needs adjusting.
@@ -3214,10 +3263,11 @@ __libc_free (void *mem)
       munmap_chunk (p);
       return;
     }
-
+  /*初始化tcache MAYBE_INIT_TCACHE()在tcache不为空时无作用*/
   MAYBE_INIT_TCACHE ();
-
+  /*根据chunk获得分配区的指针*/
   ar_ptr = arena_for_chunk (p);
+  /*调用_int_free进行释放*/
   _int_free (ar_ptr, p, 0);
 }
 libc_hidden_def (__libc_free)
@@ -3702,12 +3752,14 @@ _int_malloc (mstate av, size_t bytes)
 #if USE_TCACHE
 	      /* While we're here, if we see other chunks of the same size,
 		 stash them in the tcache.  */
+     /*找对应的tcache索引*/
 	      size_t tc_idx = csize2tidx (nb);
 	      if (tcache && tc_idx < mp_.tcache_bins)
 		{
 		  mchunkptr tc_victim;
 
 		  /* While bin not empty and tcache not full, copy chunks.  */
+      /*tcache没满 放进去填满*/
 		  while (tcache->counts[tc_idx] < mp_.tcache_count
 			 && (tc_victim = *fb) != NULL)
 		    {
@@ -4349,7 +4401,7 @@ _int_malloc (mstate av, size_t bytes)
 /*
    ------------------------------ free ------------------------------
  */
-
+/*这部分是真正的free*/
 static void
 _int_free (mstate av, mchunkptr p, int have_lock)
 {
@@ -4361,25 +4413,28 @@ _int_free (mstate av, mchunkptr p, int have_lock)
   INTERNAL_SIZE_T prevsize;    /* size of previous contiguous chunk */
   mchunkptr bck;               /* misc temp for linking */
   mchunkptr fwd;               /* misc temp for linking */
-
+  /*获取size大小*/
   size = chunksize (p);
 
   /* Little security check which won't hurt performance: the
      allocator never wrapps around at the end of the address space.
      Therefore we can exclude some size values which might appear
      here by accident or by "design" from some intruder.  */
+  /*对指针进行检查  第一个指针大于-size是啥意思？  第二个是判断对齐*/
   if (__builtin_expect ((uintptr_t) p > (uintptr_t) -size, 0)
       || __builtin_expect (misaligned_chunk (p), 0))
     malloc_printerr ("free(): invalid pointer");
   /* We know that each chunk is at least MINSIZE bytes in size or a
      multiple of MALLOC_ALIGNMENT.  */
+  /*大小没有最小的chunk大或大小不是MALLOC_ALIGNMENT的整数倍*/
   if (__glibc_unlikely (size < MINSIZE || !aligned_OK (size)))
     malloc_printerr ("free(): invalid size");
-
+  /*检查chunk是否处于使用状态*/
   check_inuse_chunk(av, p);
 
 #if USE_TCACHE
   {
+    /*找对应到tcache的index*/
     size_t tc_idx = csize2tidx (size);
     if (tcache != NULL && tc_idx < mp_.tcache_bins)
       {
@@ -4390,6 +4445,7 @@ _int_free (mstate av, mchunkptr p, int have_lock)
 	   trust it (it also matches random payload data at a 1 in
 	   2^<size_t> chance), so verify it's not an unlikely
 	   coincidence before aborting.  */
+  /*遍历链表看是不是有相同的tcache chunk 防止double free*/
 	if (__glibc_unlikely (e->key == tcache))
 	  {
 	    tcache_entry *tmp;
@@ -4402,10 +4458,10 @@ _int_free (mstate av, mchunkptr p, int have_lock)
 	    /* If we get here, it was a coincidence.  We've wasted a
 	       few cycles, but don't abort.  */
 	  }
-
+  /*如果对应的tcache链没满  就是小于7个  那就调用tcache_put放进去*/
 	if (tcache->counts[tc_idx] < mp_.tcache_count)
 	  {
-	    tcache_put (p, tc_idx);
+	    tcache_put (p, tc_idx);/*直接放回对应tcache链的头部，也没有对放入的chunk的inuse置位*/
 	    return;
 	  }
       }
@@ -4416,7 +4472,7 @@ _int_free (mstate av, mchunkptr p, int have_lock)
     If eligible, place chunk on a fastbin so it can be found
     and used quickly in malloc.
   */
-
+  /*判断是不是在 fast bin 范围*/
   if ((unsigned long)(size) <= (unsigned long)(get_max_fast ())
 
 #if TRIM_FASTBINS
@@ -4424,10 +4480,11 @@ _int_free (mstate av, mchunkptr p, int have_lock)
 	If TRIM_FASTBINS set, don't place chunks
 	bordering top into fastbins
       */
+      /*此chunk是fast chunk，并且下一个chunk是top chunk，则不能插入*/
       && (chunk_at_offset(p, size) != av->top)
 #endif
       ) {
-
+    /*下一个chunk的大小不能小于两倍的SIZE_SZ,并且下一个chunk的大小不能大于system_mem*/
     if (__builtin_expect (chunksize_nomask (chunk_at_offset (p, size))
 			  <= 2 * SIZE_SZ, 0)
 	|| __builtin_expect (chunksize (chunk_at_offset (p, size))
@@ -4448,14 +4505,17 @@ _int_free (mstate av, mchunkptr p, int have_lock)
 	if (fail)
 	  malloc_printerr ("free(): invalid next size (fast)");
       }
-
+    /*将chunk的mem设置为perturb_byte*/
     free_perturb (chunk2mem(p), size - 2 * SIZE_SZ);
-
+    
     atomic_store_relaxed (&av->have_fastchunks, true);
+    /*由size获取fastbin的索引*/
     unsigned int idx = fastbin_index(size);
+    /*获取对应fastbin的头指针*/
     fb = &fastbin (av, idx);
 
     /* Atomically link P to its fastbin: P->FD = *FB; *FB = P;  */
+    /*使用原子操作将P插入到fastbin链表中*/
     mchunkptr old = *fb, old2;
 
     if (SINGLE_THREAD_P)
@@ -4491,13 +4551,13 @@ _int_free (mstate av, mchunkptr p, int have_lock)
   /*
     Consolidate other non-mmapped chunks as they arrive.
   */
-
+  /*内存合并部分*/
   else if (!chunk_is_mmapped(p)) {
 
     /* If we're single-threaded, don't lock the arena.  */
     if (SINGLE_THREAD_P)
       have_lock = true;
-
+    /*先请求锁*/
     if (!have_lock)
       __libc_lock_lock (av->mutex);
 
@@ -4505,25 +4565,31 @@ _int_free (mstate av, mchunkptr p, int have_lock)
 
     /* Lightweight tests: check whether the block is already the
        top block.  */
+    /*轻量级检测*/
+    /*free的chunk不能是top chunk*/
     if (__glibc_unlikely (p == av->top))
       malloc_printerr ("double free or corruption (top)");
     /* Or whether the next chunk is beyond the boundaries of the arena.  */
+    /*下一个chunk不能超过arena的边界*/
     if (__builtin_expect (contiguous (av)
 			  && (char *) nextchunk
 			  >= ((char *) av->top + chunksize(av->top)), 0))
 	malloc_printerr ("double free or corruption (out)");
     /* Or whether the block is actually not marked used.  */
+    /*chunk的使用标记没有被标记 防止double free？*/
     if (__glibc_unlikely (!prev_inuse(nextchunk)))
       malloc_printerr ("double free or corruption (!prev)");
-
+    /*下一个chunk的大小*/
     nextsize = chunksize(nextchunk);
+    /*下一个chunk的大小是否不大于2*SIZE_SZ，或者nextsize是否大于系统可提供内存*/
     if (__builtin_expect (chunksize_nomask (nextchunk) <= 2 * SIZE_SZ, 0)
 	|| __builtin_expect (nextsize >= av->system_mem, 0))
       malloc_printerr ("free(): invalid next size (normal)");
-
+    /*释放 并填充chunk的mem部分*/
     free_perturb (chunk2mem(p), size - 2 * SIZE_SZ);
 
     /* consolidate backward */
+    /*后向合并  合并的是比他地址低的chunk*/
     if (!prev_inuse(p)) {
       prevsize = prev_size (p);
       size += prevsize;
@@ -4532,11 +4598,11 @@ _int_free (mstate av, mchunkptr p, int have_lock)
         malloc_printerr ("corrupted size vs. prev_size while consolidating");
       unlink_chunk (av, p);
     }
-
+    /*下一个chunk不是top chunk*/
     if (nextchunk != av->top) {
       /* get and clear inuse bit */
       nextinuse = inuse_bit_at_offset(nextchunk, nextsize);
-
+    /*而且下一个并不inuse  合并掉下一个chunk*/
       /* consolidate forward */
       if (!nextinuse) {
 	unlink_chunk (av, nextchunk);
@@ -4549,13 +4615,14 @@ _int_free (mstate av, mchunkptr p, int have_lock)
 	not placed into regular bins until after they have
 	been given one chance to be used in malloc.
       */
-
+      /*合并完放入unsorted bin*/
       bck = unsorted_chunks(av);
       fwd = bck->fd;
       if (__glibc_unlikely (fwd->bk != bck))
 	malloc_printerr ("free(): corrupted unsorted chunks");
       p->fd = fwd;
       p->bk = bck;
+      /* 如果是large chunk，就设置nextsize指针字段为NULL*/
       if (!in_smallbin_range(size))
 	{
 	  p->fd_nextsize = NULL;
@@ -4574,7 +4641,7 @@ _int_free (mstate av, mchunkptr p, int have_lock)
       If the chunk borders the current high end of memory,
       consolidate into top
     */
-
+    /*释放的chunk的下一个chunk如果是top chunk，合并到 top chunk*/
     else {
       size += nextsize;
       set_head(p, size | PREV_INUSE);
@@ -4594,7 +4661,7 @@ _int_free (mstate av, mchunkptr p, int have_lock)
       consolidation is performed if FASTBIN_CONSOLIDATION_THRESHOLD
       is reached.
     */
-
+    /*如果合并后的 chunk 的大小大于FASTBIN_CONSOLIDATION_THRESHOLD，向系统返还内存*/
     if ((unsigned long)(size) >= FASTBIN_CONSOLIDATION_THRESHOLD) {
       if (atomic_load_relaxed (&av->have_fastchunks))
 	malloc_consolidate(av);
@@ -4621,7 +4688,7 @@ _int_free (mstate av, mchunkptr p, int have_lock)
   /*
     If the chunk was allocated via mmap, release via munmap().
   */
-
+  /*释放 mmap 的 chunk*/
   else {
     munmap_chunk (p);
   }
@@ -4664,7 +4731,7 @@ static void malloc_consolidate(mstate av)
     until malloc is sure that chunks aren't immediately going to be
     reused anyway.
   */
-
+  /*按照fd顺序遍历fastbins的每一个bin，将bin中的每一个chunk都合并掉*/
   maxfb = &fastbin (av, NFASTBINS - 1);
   fb = &fastbin (av, 0);
   do {
@@ -4684,7 +4751,7 @@ static void malloc_consolidate(mstate av)
 	size = chunksize (p);
 	nextchunk = chunk_at_offset(p, size);
 	nextsize = chunksize(nextchunk);
-
+  /*找当前chunk前面的chunk  尝试合并*/
 	if (!prev_inuse(p)) {
 	  prevsize = prev_size (p);
 	  size += prevsize;
@@ -4693,14 +4760,15 @@ static void malloc_consolidate(mstate av)
 	    malloc_printerr ("corrupted size vs. prev_size in fastbins");
 	  unlink_chunk (av, p);
 	}
-
+  /*当前chunk后面的chunk  尝试合并*/
 	if (nextchunk != av->top) {
+    //判断 nextchunk inuse位
 	  nextinuse = inuse_bit_at_offset(nextchunk, nextsize);
-
 	  if (!nextinuse) {
 	    size += nextsize;
 	    unlink_chunk (av, nextchunk);
 	  } else
+      //设置 nextchunk 的 prev inuse 为0，表示可以合并当前fast chunk
 	    clear_inuse_bit_at_offset(nextchunk, 0);
 
 	  first_unsorted = unsorted_bin->fd;
