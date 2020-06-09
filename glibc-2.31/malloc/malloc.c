@@ -1661,7 +1661,7 @@ typedef struct malloc_chunk *mfastbinptr;
 
 
 /* The maximum fastbin request size we support */
-/*支持的最大fastbin大小*/
+/*支持的最大fastbin大小(这里大小指的是数据部分？)*/
 #define MAX_FAST_SIZE     (80 * SIZE_SZ / 4)
 
 /*fastbin数量*/
@@ -3818,6 +3818,7 @@ _int_malloc (mstate av, size_t bytes)
 #if USE_TCACHE
 	  /* While we're here, if we see other chunks of the same size,
 	     stash them in the tcache.  */
+       /*当从这个small bin中找到一个可用chunk后，会把bin上其他的所有chunk都放入tcache*/
 	  size_t tc_idx = csize2tidx (nb);
 	  if (tcache && tc_idx < mp_.tcache_bins)
 	    {
@@ -3829,13 +3830,14 @@ _int_malloc (mstate av, size_t bytes)
 		{
 		  if (tc_victim != 0)
 		    {
+          /*这里是先从链上取下chunk，类似于unlink操作，不过相比之下更加的简单，没有安全检查  tcache smallbin unlink*/
 		      bck = tc_victim->bk;
 		      set_inuse_bit_at_offset (tc_victim, nb);
 		      if (av != &main_arena)
 			set_non_main_arena (tc_victim);
 		      bin->bk = bck;
 		      bck->fd = bin;
-
+          /*将取下的chunk放入tcache中*/
 		      tcache_put (tc_victim, tc_idx);
 	            }
 		}
@@ -3990,10 +3992,12 @@ _int_malloc (mstate av, size_t bytes)
 #if USE_TCACHE
 	      /* Fill cache first, return to user only if cache fills.
 		 We may return one of these chunks later.  */
+      /*向tcache中放*/
 	      if (tcache_nb
 		  && tcache->counts[tc_idx] < mp_.tcache_count)
 		{
 		  tcache_put (victim, tc_idx);
+      /*标志位，被置位说明满足要求的chunk被放入tcache中了，后面以此判断是否需要从tcache中取*/
 		  return_cached = 1;
 		  continue;
 		}
@@ -4089,6 +4093,7 @@ _int_malloc (mstate av, size_t bytes)
 #if USE_TCACHE
       /* If we've processed as many chunks as we're allowed while
 	 filling the cache, return one of the cached ones.  */
+   /*设置一个清理上限，清理到一定次数就不再清理了*/
       ++tcache_unsorted_count;
       if (return_cached
 	  && mp_.tcache_unsorted_limit > 0
@@ -4105,6 +4110,7 @@ _int_malloc (mstate av, size_t bytes)
 
 #if USE_TCACHE
       /* If all the small chunks we found ended up cached, return one now.  */
+      /*根据前面的标志说明tcache中已经有了满足要求的small chunk，从tcache中取出一个给用户使用*/
       if (return_cached)
 	{
 	  return tcache_get (tc_idx);
